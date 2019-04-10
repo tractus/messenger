@@ -16,10 +16,17 @@ import (
 
 // AttachmentType is attachment type.
 type AttachmentType string
+type MessagingType string
+type TopElementStyle string
+type ImageAspectRatio string
 
 const (
 	// SendMessageURL is API endpoint for sending messages.
-	SendMessageURL = "https://graph.facebook.com/v2.6/me/messages"
+	SendMessageURL = "https://graph.facebook.com/v2.11/me/messages"
+	// ThreadControlURL is the API endpoint for passing thread control.
+	ThreadControlURL = "https://graph.facebook.com/v2.6/me/pass_thread_control"
+	// InboxPageID is managed by facebook for secondary pass to inbox features: https://developers.facebook.com/docs/messenger-platform/handover-protocol/pass-thread-control
+	InboxPageID = 263902037430900
 
 	// ImageAttachment is image attachment type.
 	ImageAttachment AttachmentType = "image"
@@ -29,6 +36,25 @@ const (
 	VideoAttachment AttachmentType = "video"
 	// FileAttachment is file attachment type.
 	FileAttachment AttachmentType = "file"
+
+	// ResponseType is response messaging type
+	ResponseType MessagingType = "RESPONSE"
+	// UpdateType is update messaging type
+	UpdateType MessagingType = "UPDATE"
+	// MessageTagType is message_tag messaging type
+	MessageTagType MessagingType = "MESSAGE_TAG"
+	// NonPromotionalSubscriptionType is NON_PROMOTIONAL_SUBSCRIPTION messaging type
+	NonPromotionalSubscriptionType MessagingType = "NON_PROMOTIONAL_SUBSCRIPTION"
+
+	// TopElementStyle is compact.
+	CompactTopElementStyle TopElementStyle = "compact"
+	// TopElementStyle is large.
+	LargeTopElementStyle TopElementStyle = "large"
+
+	// ImageAspectRatio is horizontal (1.91:1). Default.
+	HorizontalImageAspectRatio ImageAspectRatio = "horizontal"
+	// ImageAspectRatio is square.
+	SquareImageAspectRatio ImageAspectRatio = "square"
 )
 
 // QueryResponse is the response sent back by Facebook when setting up things
@@ -65,32 +91,53 @@ type Response struct {
 	to    Recipient
 }
 
+// SetToken is for using DispatchMessage from outside.
+func (r *Response) SetToken(token string) {
+	r.token = token
+}
+
 // Text sends a textual message.
-func (r *Response) Text(message string) error {
-	return r.TextWithReplies(message, nil)
+func (r *Response) Text(message string, messagingType MessagingType, tags ...string) error {
+	return r.TextWithReplies(message, nil, messagingType, tags...)
 }
 
 // TextWithReplies sends a textual message with some replies
-func (r *Response) TextWithReplies(message string, replies []QuickReply) error {
+// messagingType should be one of the following: "RESPONSE","UPDATE","MESSAGE_TAG","NON_PROMOTIONAL_SUBSCRIPTION"
+// only supply tags when messagingType == "MESSAGE_TAG" (see https://developers.facebook.com/docs/messenger-platform/send-messages#messaging_types for more)
+func (r *Response) TextWithReplies(message string, replies []QuickReply, messagingType MessagingType, tags ...string) error {
+	var tag string
+	if len(tags) > 0 {
+		tag = tags[0]
+	}
+
 	m := SendMessage{
-		Recipient: r.to,
+		MessagingType: messagingType,
+		Recipient:     r.to,
 		Message: MessageData{
 			Text:         message,
 			Attachment:   nil,
 			QuickReplies: replies,
 		},
+		Tag: tag,
 	}
 	return r.DispatchMessage(&m)
 }
 
 // AttachmentWithReplies sends a attachment message with some replies
-func (r *Response) AttachmentWithReplies(attachment *StructuredMessageAttachment, replies []QuickReply) error {
+func (r *Response) AttachmentWithReplies(attachment *StructuredMessageAttachment, replies []QuickReply, messagingType MessagingType, tags ...string) error {
+	var tag string
+	if len(tags) > 0 {
+		tag = tags[0]
+	}
+
 	m := SendMessage{
-		Recipient: r.to,
+		MessagingType: messagingType,
+		Recipient:     r.to,
 		Message: MessageData{
 			Attachment:   attachment,
 			QuickReplies: replies,
 		},
+		Tag: tag,
 	}
 	return r.DispatchMessage(&m)
 }
@@ -107,9 +154,15 @@ func (r *Response) Image(im image.Image) error {
 }
 
 // Attachment sends an image, sound, video or a regular file to a chat.
-func (r *Response) Attachment(dataType AttachmentType, url string) error {
+func (r *Response) Attachment(dataType AttachmentType, url string, messagingType MessagingType, tags ...string) error {
+	var tag string
+	if len(tags) > 0 {
+		tag = tags[0]
+	}
+
 	m := SendStructuredMessage{
-		Recipient: r.to,
+		MessagingType: messagingType,
+		Recipient:     r.to,
 		Message: StructuredMessageData{
 			Attachment: StructuredMessageAttachment{
 				Type: dataType,
@@ -118,6 +171,7 @@ func (r *Response) Attachment(dataType AttachmentType, url string) error {
 				},
 			},
 		},
+		Tag: tag,
 	}
 	return r.DispatchMessage(&m)
 }
@@ -222,9 +276,15 @@ func (r *Response) AttachmentData(dataType AttachmentType, filename string, file
 }
 
 // ButtonTemplate sends a message with the main contents being button elements
-func (r *Response) ButtonTemplate(text string, buttons *[]StructuredMessageButton) error {
+func (r *Response) ButtonTemplate(text string, buttons *[]StructuredMessageButton, messagingType MessagingType, tags ...string) error {
+	var tag string
+	if len(tags) > 0 {
+		tag = tags[0]
+	}
+
 	m := SendStructuredMessage{
-		Recipient: r.to,
+		MessagingType: messagingType,
+		Recipient:     r.to,
 		Message: StructuredMessageData{
 			Attachment: StructuredMessageAttachment{
 				Type: "template",
@@ -236,15 +296,22 @@ func (r *Response) ButtonTemplate(text string, buttons *[]StructuredMessageButto
 				},
 			},
 		},
+		Tag: tag,
 	}
 
 	return r.DispatchMessage(&m)
 }
 
 // GenericTemplate is a message which allows for structural elements to be sent
-func (r *Response) GenericTemplate(elements *[]StructuredMessageElement) error {
+func (r *Response) GenericTemplate(elements *[]StructuredMessageElement, messagingType MessagingType, tags ...string) error {
+	var tag string
+	if len(tags) > 0 {
+		tag = tags[0]
+	}
+
 	m := SendStructuredMessage{
-		Recipient: r.to,
+		MessagingType: messagingType,
+		Recipient:     r.to,
 		Message: StructuredMessageData{
 			Attachment: StructuredMessageAttachment{
 				Type: "template",
@@ -255,6 +322,7 @@ func (r *Response) GenericTemplate(elements *[]StructuredMessageElement) error {
 				},
 			},
 		},
+		Tag: tag,
 	}
 	return r.DispatchMessage(&m)
 }
@@ -294,10 +362,43 @@ func (r *Response) DispatchMessage(m interface{}) error {
 	return checkFacebookError(resp.Body)
 }
 
+// PassThreadToInbox Uses Messenger Handover Protocol for live inbox
+// https://developers.facebook.com/docs/messenger-platform/handover-protocol/#inbox
+func (r *Response) PassThreadToInbox() error {
+	p := passThreadControl{
+		Recipient:   r.to,
+		TargetAppID: InboxPageID,
+		Metadata:    "Passing to inbox secondary app",
+	}
+
+	data, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", ThreadControlURL, bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.URL.RawQuery = "access_token=" + r.token
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return checkFacebookError(resp.Body)
+}
+
 // SendMessage is the information sent in an API request to Facebook.
 type SendMessage struct {
-	Recipient Recipient   `json:"recipient"`
-	Message   MessageData `json:"message"`
+	MessagingType MessagingType `json:"messaging_type"`
+	Recipient     Recipient     `json:"recipient"`
+	Message       MessageData   `json:"message"`
+	Tag           string        `json:"tag,omitempty"`
 }
 
 // MessageData is a message consisting of text or an attachment, with an additional selection of optional quick replies.
@@ -309,8 +410,10 @@ type MessageData struct {
 
 // SendStructuredMessage is a structured message template.
 type SendStructuredMessage struct {
-	Recipient Recipient             `json:"recipient"`
-	Message   StructuredMessageData `json:"message"`
+	MessagingType MessagingType         `json:"messaging_type"`
+	Recipient     Recipient             `json:"recipient"`
+	Message       StructuredMessageData `json:"message"`
+	Tag           string                `json:"tag,omitempty"`
 }
 
 // StructuredMessageData is an attachment sent with a structured message.
@@ -329,32 +432,48 @@ type StructuredMessageAttachment struct {
 // StructuredMessagePayload is the actual payload of an attachment
 type StructuredMessagePayload struct {
 	// TemplateType must be button, generic or receipt
-	TemplateType string                      `json:"template_type,omitempty"`
-	Text         string                      `json:"text,omitempty"`
-	Elements     *[]StructuredMessageElement `json:"elements,omitempty"`
-	Buttons      *[]StructuredMessageButton  `json:"buttons,omitempty"`
-	Url          string                      `json:"url,omitempty"`
+	TemplateType     string                      `json:"template_type,omitempty"`
+	TopElementStyle  TopElementStyle             `json:"top_element_style,omitempty"`
+	Text             string                      `json:"text,omitempty"`
+	ImageAspectRatio ImageAspectRatio            `json:"image_aspect_ratio,omitempty"`
+	Sharable         bool                        `json:"sharable,omitempty"`
+	Elements         *[]StructuredMessageElement `json:"elements,omitempty"`
+	Buttons          *[]StructuredMessageButton  `json:"buttons,omitempty"`
+	Url              string                      `json:"url,omitempty"`
+	AttachmentID     string                      `json:"attachment_id,omitempty"`
 }
 
 // StructuredMessageElement is a response containing structural elements
 type StructuredMessageElement struct {
-	Title    string                    `json:"title"`
-	ImageURL string                    `json:"image_url"`
-	ItemURL  string                    `json:"item_url"`
-	Subtitle string                    `json:"subtitle"`
-	Buttons  []StructuredMessageButton `json:"buttons"`
+	Title         string                    `json:"title"`
+	ImageURL      string                    `json:"image_url"`
+	ItemURL       string                    `json:"item_url,omitempty"`
+	Subtitle      string                    `json:"subtitle"`
+	DefaultAction *DefaultAction            `json:"default_action,omitempty"`
+	Buttons       []StructuredMessageButton `json:"buttons"`
 }
 
-// StructuredMessageButton is a response containing buttons
-type StructuredMessageButton struct {
+// DefaultAction is a response containing default action properties
+type DefaultAction struct {
 	Type                string `json:"type"`
 	URL                 string `json:"url,omitempty"`
-	Title               string `json:"title,omitempty"`
-	Payload             string `json:"payload,omitempty"`
 	WebviewHeightRatio  string `json:"webview_height_ratio,omitempty"`
 	MessengerExtensions bool   `json:"messenger_extensions,omitempty"`
 	FallbackURL         string `json:"fallback_url,omitempty"`
 	WebviewShareButton  string `json:"webview_share_button,omitempty"`
+}
+
+// StructuredMessageButton is a response containing buttons
+type StructuredMessageButton struct {
+	Type                string                 `json:"type"`
+	URL                 string                 `json:"url,omitempty"`
+	Title               string                 `json:"title,omitempty"`
+	Payload             string                 `json:"payload,omitempty"`
+	WebviewHeightRatio  string                 `json:"webview_height_ratio,omitempty"`
+	MessengerExtensions bool                   `json:"messenger_extensions,omitempty"`
+	FallbackURL         string                 `json:"fallback_url,omitempty"`
+	WebviewShareButton  string                 `json:"webview_share_button,omitempty"`
+	ShareContents       *StructuredMessageData `json:"share_contents,omitempty"`
 }
 
 // SendSenderAction is the information about sender action

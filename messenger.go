@@ -16,10 +16,13 @@ const (
 	// ProfileURL is the API endpoint used for retrieving profiles.
 	// Used in the form: https://graph.facebook.com/v2.6/<USER_ID>?fields=<PROFILE_FIELDS>&access_token=<PAGE_ACCESS_TOKEN>
 	ProfileURL = "https://graph.facebook.com/v2.6/"
-	// ProfileFields is a list of JSON field names which will be populated by the profile query.
-	ProfileFields = "first_name,last_name,profile_pic,locale,timezone,gender"
 	// SendSettingsURL is API endpoint for saving settings.
 	SendSettingsURL = "https://graph.facebook.com/v2.6/me/thread_settings"
+
+	// MessengerProfileURL is the API endoint where yout bot set properties that define various aspects of the following Messenger Platform features.
+	// Used in the form https://graph.facebook.com/v2.6/me/messenger_profile?access_token=<PAGE_ACCESS_TOKEN>
+	// https://developers.facebook.com/docs/messenger-platform/reference/messenger-profile-api/
+	MessengerProfileURL = "https://graph.facebook.com/v2.6/me/messenger_profile"
 )
 
 // Options are the settings used when creating a Messenger client.
@@ -59,19 +62,24 @@ type OptInHandler func(OptIn, *Response)
 // ReferralHandler is a handler used postback callbacks.
 type ReferralHandler func(ReferralMessage, *Response)
 
+// AccountLinkingHandler is a handler used to react to an account
+// being linked or unlinked.
+type AccountLinkingHandler func(AccountLinking, *Response)
+
 // Messenger is the client which manages communication with the Messenger Platform API.
 type Messenger struct {
-	mux              *http.ServeMux
-	messageHandlers  []MessageHandler
-	deliveryHandlers []DeliveryHandler
-	readHandlers     []ReadHandler
-	postBackHandlers []PostBackHandler
-	optInHandlers    []OptInHandler
-	referralHandlers []ReferralHandler
-	token            string
-	verifyHandler    func(http.ResponseWriter, *http.Request)
-	verify           bool
-	appSecret        string
+	mux                    *http.ServeMux
+	messageHandlers        []MessageHandler
+	deliveryHandlers       []DeliveryHandler
+	readHandlers           []ReadHandler
+	postBackHandlers       []PostBackHandler
+	optInHandlers          []OptInHandler
+	referralHandlers       []ReferralHandler
+	accountLinkingHandlers []AccountLinkingHandler
+	token                  string
+	verifyHandler          func(http.ResponseWriter, *http.Request)
+	verify                 bool
+	appSecret              string
 }
 
 // New creates a new Messenger. You pass in Options in order to affect settings.
@@ -131,13 +139,26 @@ func (m *Messenger) HandleReferral(f ReferralHandler) {
 	m.referralHandlers = append(m.referralHandlers, f)
 }
 
+// HandleAccountLinking adds a new AccountLinkingHandler to the Messenger
+func (m *Messenger) HandleAccountLinking(f AccountLinkingHandler) {
+	m.accountLinkingHandlers = append(m.accountLinkingHandlers, f)
+}
+
 // Handler returns the Messenger in HTTP client form.
 func (m *Messenger) Handler() http.Handler {
 	return m.mux
 }
 
-// ProfileByID retrieves the Facebook user associated with that ID
-func (m *Messenger) ProfileByID(id int64) (Profile, error) {
+// ProfileByID retrieves the Facebook user profile associated with that ID.
+// According to the messenger docs: https://developers.facebook.com/docs/messenger-platform/identity/user-profile,
+// Developers must ask for access except for some fields that are accessible without permissions.
+//
+// At the time of writing (2019-01-04), these fields are
+// - Name
+// - First Name
+// - Last Name
+// - Profile Picture
+func (m *Messenger) ProfileByID(id int64, profileFields []string) (Profile, error) {
 	p := Profile{}
 	url := fmt.Sprintf("%v%v", ProfileURL, id)
 
@@ -146,7 +167,9 @@ func (m *Messenger) ProfileByID(id int64) (Profile, error) {
 		return p, err
 	}
 
-	req.URL.RawQuery = "fields=" + ProfileFields + "&access_token=" + m.token
+	fields := strings.Join(profileFields, ",")
+
+	req.URL.RawQuery = "fields=" + fields + "&access_token=" + m.token
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -209,7 +232,7 @@ func (m *Messenger) GreetingSetting(text string) error {
 	return checkFacebookError(resp.Body)
 }
 
-// CallToActionsSetting sends settings for Get Started or Persist Menu
+// CallToActionsSetting sends settings for Get Started or Persistent Menu
 func (m *Messenger) CallToActionsSetting(state string, actions []CallToActionsItem) error {
 	d := CallToActionsSetting{
 		SettingType:   "call_to_actions",
@@ -370,6 +393,14 @@ func (m *Messenger) dispatch(r Receive) {
 					message.Time = time.Unix(info.Timestamp/int64(time.Microsecond), 0)
 					f(message, resp)
 				}
+			case AccountLinkingAction:
+				for _, f := range m.accountLinkingHandlers {
+					message := *info.AccountLinking
+					message.Sender = info.Sender
+					message.Recipient = info.Recipient
+					message.Time = time.Unix(info.Timestamp/int64(time.Microsecond), 0)
+					f(message, resp)
+				}
 			}
 		}
 	}
@@ -384,37 +415,66 @@ func (m *Messenger) Response(to int64) *Response {
 }
 
 // Send will send a textual message to a user. This user must have previously initiated a conversation with the bot.
-func (m *Messenger) Send(to Recipient, message string) error {
-	return m.SendWithReplies(to, message, nil)
+func (m *Messenger) Send(to Recipient, message string, messagingType MessagingType, tags ...string) error {
+	return m.SendWithReplies(to, message, nil, messagingType, tags...)
 }
 
 // SendGeneralMessage will send the GenericTemplate message
-func (m *Messenger) SendGeneralMessage(to Recipient, elements *[]StructuredMessageElement) error {
+func (m *Messenger) SendGeneralMessage(to Recipient, elements *[]StructuredMessageElement, messagingType MessagingType, tags ...string) error {
 	r := &Response{
 		token: m.token,
 		to:    to,
 	}
-	return r.GenericTemplate(elements)
+	return r.GenericTemplate(elements, messagingType, tags...)
 }
 
 // SendWithReplies sends a textual message to a user, but gives them the option of numerous quick response options.
-func (m *Messenger) SendWithReplies(to Recipient, message string, replies []QuickReply) error {
+func (m *Messenger) SendWithReplies(to Recipient, message string, replies []QuickReply, messagingType MessagingType, tags ...string) error {
 	response := &Response{
 		token: m.token,
 		to:    to,
 	}
 
-	return response.TextWithReplies(message, replies)
+	return response.TextWithReplies(message, replies, messagingType, tags...)
 }
 
 // Attachment sends an image, sound, video or a regular file to a given recipient.
-func (m *Messenger) Attachment(to Recipient, dataType AttachmentType, url string) error {
+func (m *Messenger) Attachment(to Recipient, dataType AttachmentType, url string, messagingType MessagingType, tags ...string) error {
 	response := &Response{
 		token: m.token,
 		to:    to,
 	}
 
-	return response.Attachment(dataType, url)
+	return response.Attachment(dataType, url, messagingType, tags...)
+}
+
+// EnableChatExtension set the homepage url required for a chat extension.
+func (m *Messenger) EnableChatExtension(homeURL HomeURL) error {
+	wrap := map[string]interface{}{
+		"home_url": homeURL,
+	}
+	data, err := json.Marshal(wrap)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", MessengerProfileURL, bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.URL.RawQuery = "access_token=" + m.token
+
+	client := &http.Client{}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return checkFacebookError(resp.Body)
 }
 
 // classify determines what type of message a webhook event is.
@@ -431,6 +491,8 @@ func (m *Messenger) classify(info MessageInfo, e Entry) Action {
 		return OptInAction
 	} else if info.ReferralMessage != nil {
 		return ReferralAction
+	} else if info.AccountLinking != nil {
+		return AccountLinkingAction
 	}
 	return UnknownAction
 }
