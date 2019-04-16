@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/julienschmidt/httprouter"
 )
 
 const (
@@ -30,22 +32,14 @@ type Options struct {
 	// Verify sets whether or not to be in the "verify" mode. Used for
 	// verifying webhooks on the Facebook Developer Portal.
 	Verify bool
-	// AppSecret is the app secret from the Facebook Developer Portal. Used when
-	// in the "verify" mode.
-	AppSecret string
-	// VerifyToken is the token to be used when verifying the webhook. Is set
-	// when the webhook is created.
-	VerifyToken string
-	// Token is the access token of the Facebook page to send messages from.
-	Token string
 	// WebhookURL is where the Messenger client should listen for webhook events. Leaving the string blank implies a path of "/".
 	WebhookURL string
 	// Mux is shared mux between several Messenger objects
-	Mux *http.ServeMux
+	Mux *httprouter.Router
 }
 
 // MessageHandler is a handler used for responding to a message containing text.
-type MessageHandler func(Message, *Response)
+type MessageHandler func(Message, *Response, httprouter.Params)
 
 // DeliveryHandler is a handler used for responding to a delivery receipt.
 type DeliveryHandler func(Delivery, *Response)
@@ -66,41 +60,48 @@ type ReferralHandler func(ReferralMessage, *Response)
 // being linked or unlinked.
 type AccountLinkingHandler func(AccountLinking, *Response)
 
+// VerifyHandler is a handler used for verify callbacks.
+type VerifyHandler func(string, httprouter.Params) bool
+
+// AppSecretHandler is a handler used to provide app secrets
+type AppSecretHandler func(httprouter.Params) string
+
+// PageTokenHandler is a handler used to provide page tokens
+type PageTokenHandler func(httprouter.Params) string
+
 // Messenger is the client which manages communication with the Messenger Platform API.
 type Messenger struct {
-	mux                    *http.ServeMux
+	accountLinkingHandlers []AccountLinkingHandler
+	mux                    *httprouter.Router
 	messageHandlers        []MessageHandler
 	deliveryHandlers       []DeliveryHandler
 	readHandlers           []ReadHandler
 	postBackHandlers       []PostBackHandler
 	optInHandlers          []OptInHandler
+	verifyHandlers         []VerifyHandler
+	appSecretHandlers      []AppSecretHandler
+	pageTokenHandlers      []PageTokenHandler
 	referralHandlers       []ReferralHandler
-	accountLinkingHandlers []AccountLinkingHandler
-	token                  string
-	verifyHandler          func(http.ResponseWriter, *http.Request)
 	verify                 bool
-	appSecret              string
 }
 
 // New creates a new Messenger. You pass in Options in order to affect settings.
 func New(mo Options) *Messenger {
 	if mo.Mux == nil {
-		mo.Mux = http.NewServeMux()
+		mo.Mux = httprouter.New()
 	}
 
 	m := &Messenger{
-		mux:       mo.Mux,
-		token:     mo.Token,
-		verify:    mo.Verify,
-		appSecret: mo.AppSecret,
+		mux:    mo.Mux,
+		verify: mo.Verify,
 	}
 
 	if mo.WebhookURL == "" {
 		mo.WebhookURL = "/"
 	}
 
-	m.verifyHandler = newVerifyHandler(mo.VerifyToken)
-	m.mux.HandleFunc(mo.WebhookURL, m.handle)
+	m.mux.GET(mo.WebhookURL, m.verifyHandler)
+	m.mux.POST(mo.WebhookURL, m.handle)
 
 	return m
 }
@@ -144,9 +145,35 @@ func (m *Messenger) HandleAccountLinking(f AccountLinkingHandler) {
 	m.accountLinkingHandlers = append(m.accountLinkingHandlers, f)
 }
 
+// HandleVerification adds a new VerifyHandler to the Messenger
+func (m *Messenger) HandleVerification(f VerifyHandler) {
+	m.verifyHandlers = append(m.verifyHandlers, f)
+}
+
+// HandleAppSecret adds a new SecretHandler to the Messenger
+func (m *Messenger) HandleAppSecret(f AppSecretHandler) {
+	m.appSecretHandlers = append(m.appSecretHandlers, f)
+}
+
+// HandlePageToken adds a new PageTokenHandler to the Messenger
+func (m *Messenger) HandlePageToken(f PageTokenHandler) {
+	m.pageTokenHandlers = append(m.pageTokenHandlers, f)
+}
+
 // Handler returns the Messenger in HTTP client form.
 func (m *Messenger) Handler() http.Handler {
 	return m.mux
+}
+
+func (m *Messenger) token(ps httprouter.Params) string {
+	var pageToken string
+	for _, f := range m.pageTokenHandlers {
+		pageToken = f(ps)
+		if pageToken != "" {
+			break
+		}
+	}
+	return pageToken
 }
 
 // ProfileByID retrieves the Facebook user profile associated with that ID.
@@ -158,7 +185,7 @@ func (m *Messenger) Handler() http.Handler {
 // - First Name
 // - Last Name
 // - Profile Picture
-func (m *Messenger) ProfileByID(id int64, profileFields []string) (Profile, error) {
+func (m *Messenger) ProfileByID(id int64, profileFields []string, pageToken string) (Profile, error) {
 	p := Profile{}
 	url := fmt.Sprintf("%v%v", ProfileURL, id)
 
@@ -169,7 +196,7 @@ func (m *Messenger) ProfileByID(id int64, profileFields []string) (Profile, erro
 
 	fields := strings.Join(profileFields, ",")
 
-	req.URL.RawQuery = "fields=" + fields + "&access_token=" + m.token
+	req.URL.RawQuery = "fields=" + fields + "&access_token=" + pageToken
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -200,7 +227,7 @@ func (m *Messenger) ProfileByID(id int64, profileFields []string) (Profile, erro
 }
 
 // GreetingSetting sends settings for greeting
-func (m *Messenger) GreetingSetting(text string) error {
+func (m *Messenger) GreetingSetting(text string, pageToken string) error {
 	d := GreetingSetting{
 		SettingType: "greeting",
 		Greeting: GreetingInfo{
@@ -219,7 +246,7 @@ func (m *Messenger) GreetingSetting(text string) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.URL.RawQuery = "access_token=" + m.token
+	req.URL.RawQuery = "access_token=" + pageToken
 
 	client := &http.Client{}
 
@@ -232,8 +259,8 @@ func (m *Messenger) GreetingSetting(text string) error {
 	return checkFacebookError(resp.Body)
 }
 
-// CallToActionsSetting sends settings for Get Started or Persistent Menu
-func (m *Messenger) CallToActionsSetting(state string, actions []CallToActionsItem) error {
+// CallToActionsSetting sends settings for Get Started or Persist Menu
+func (m *Messenger) CallToActionsSetting(state string, actions []CallToActionsItem, pageToken string) error {
 	d := CallToActionsSetting{
 		SettingType:   "call_to_actions",
 		ThreadState:   state,
@@ -251,7 +278,7 @@ func (m *Messenger) CallToActionsSetting(state string, actions []CallToActionsIt
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.URL.RawQuery = "access_token=" + m.token
+	req.URL.RawQuery = "access_token=" + pageToken
 
 	client := &http.Client{}
 
@@ -265,12 +292,7 @@ func (m *Messenger) CallToActionsSetting(state string, actions []CallToActionsIt
 }
 
 // handle is the internal HTTP handler for the webhooks.
-func (m *Messenger) handle(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		m.verifyHandler(w, r)
-		return
-	}
-
+func (m *Messenger) handle(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 	var rec Receive
 
 	// consume a *copy* of the request body
@@ -289,21 +311,28 @@ func (m *Messenger) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if m.verify {
-		if err := m.checkIntegrity(r); err != nil {
+		if err := m.checkIntegrity(r, ps); err != nil {
 			fmt.Println("could not verify request:", err)
 			fmt.Fprintln(w, `{status: 'not ok'}`)
 			return
 		}
 	}
 
-	m.dispatch(rec)
+	m.dispatch(rec, ps)
 
 	fmt.Fprintln(w, `{status: 'ok'}`)
 }
 
 // checkIntegrity checks the integrity of the requests received
-func (m *Messenger) checkIntegrity(r *http.Request) error {
-	if m.appSecret == "" {
+func (m *Messenger) checkIntegrity(r *http.Request, ps httprouter.Params) error {
+	var appSecret string
+	for _, f := range m.appSecretHandlers {
+		appSecret = f(ps)
+		if appSecret != "" {
+			break
+		}
+	}
+	if appSecret == "" {
 		return fmt.Errorf("missing app secret")
 	}
 
@@ -317,7 +346,7 @@ func (m *Messenger) checkIntegrity(r *http.Request) error {
 	}
 
 	checkSHA1 := func(body []byte, hash string) error {
-		mac := hmac.New(sha1.New, []byte(m.appSecret))
+		mac := hmac.New(sha1.New, []byte(appSecret))
 		if mac.Write(body); fmt.Sprintf("%x", mac.Sum(nil)) != hash {
 			return fmt.Errorf("invalid signature: %s", hash)
 		}
@@ -338,7 +367,7 @@ func (m *Messenger) checkIntegrity(r *http.Request) error {
 }
 
 // dispatch triggers all of the relevant handlers when a webhook event is received.
-func (m *Messenger) dispatch(r Receive) {
+func (m *Messenger) dispatch(r Receive, ps httprouter.Params) {
 	for _, entry := range r.Entry {
 		for _, info := range entry.Messaging {
 			a := m.classify(info, entry)
@@ -349,7 +378,7 @@ func (m *Messenger) dispatch(r Receive) {
 
 			resp := &Response{
 				to:    Recipient{info.Sender.ID},
-				token: m.token,
+				token: m.token(ps),
 			}
 
 			switch a {
@@ -359,7 +388,7 @@ func (m *Messenger) dispatch(r Receive) {
 					message.Sender = info.Sender
 					message.Recipient = info.Recipient
 					message.Time = time.Unix(info.Timestamp/int64(time.Microsecond), 0)
-					f(message, resp)
+					f(message, resp, ps)
 				}
 			case DeliveryAction:
 				for _, f := range m.deliveryHandlers {
@@ -407,31 +436,31 @@ func (m *Messenger) dispatch(r Receive) {
 }
 
 // Response returns new Response object
-func (m *Messenger) Response(to int64) *Response {
+func (m *Messenger) Response(to int64, pageToken string) *Response {
 	return &Response{
 		to:    Recipient{to},
-		token: m.token,
+		token: pageToken,
 	}
 }
 
 // Send will send a textual message to a user. This user must have previously initiated a conversation with the bot.
-func (m *Messenger) Send(to Recipient, message string, messagingType MessagingType, tags ...string) error {
-	return m.SendWithReplies(to, message, nil, messagingType, tags...)
+func (m *Messenger) Send(to Recipient, message string, messagingType MessagingType, pageToken string, tags ...string) error {
+	return m.SendWithReplies(to, message, nil, messagingType, pageToken, tags...)
 }
 
 // SendGeneralMessage will send the GenericTemplate message
-func (m *Messenger) SendGeneralMessage(to Recipient, elements *[]StructuredMessageElement, messagingType MessagingType, tags ...string) error {
+func (m *Messenger) SendGeneralMessage(to Recipient, elements *[]StructuredMessageElement, messagingType MessagingType, pageToken string, tags ...string) error {
 	r := &Response{
-		token: m.token,
+		token: pageToken,
 		to:    to,
 	}
 	return r.GenericTemplate(elements, messagingType, tags...)
 }
 
 // SendWithReplies sends a textual message to a user, but gives them the option of numerous quick response options.
-func (m *Messenger) SendWithReplies(to Recipient, message string, replies []QuickReply, messagingType MessagingType, tags ...string) error {
+func (m *Messenger) SendWithReplies(to Recipient, message string, replies []QuickReply, messagingType MessagingType, pageToken string, tags ...string) error {
 	response := &Response{
-		token: m.token,
+		token: pageToken,
 		to:    to,
 	}
 
@@ -439,9 +468,9 @@ func (m *Messenger) SendWithReplies(to Recipient, message string, replies []Quic
 }
 
 // Attachment sends an image, sound, video or a regular file to a given recipient.
-func (m *Messenger) Attachment(to Recipient, dataType AttachmentType, url string, messagingType MessagingType, tags ...string) error {
+func (m *Messenger) Attachment(to Recipient, dataType AttachmentType, url string, messagingType MessagingType, pageToken string, tags ...string) error {
 	response := &Response{
-		token: m.token,
+		token: pageToken,
 		to:    to,
 	}
 
@@ -449,7 +478,7 @@ func (m *Messenger) Attachment(to Recipient, dataType AttachmentType, url string
 }
 
 // EnableChatExtension set the homepage url required for a chat extension.
-func (m *Messenger) EnableChatExtension(homeURL HomeURL) error {
+func (m *Messenger) EnableChatExtension(homeURL HomeURL, pageToken string) error {
 	wrap := map[string]interface{}{
 		"home_url": homeURL,
 	}
@@ -464,7 +493,7 @@ func (m *Messenger) EnableChatExtension(homeURL HomeURL) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.URL.RawQuery = "access_token=" + m.token
+	req.URL.RawQuery = "access_token=" + pageToken
 
 	client := &http.Client{}
 
@@ -497,13 +526,14 @@ func (m *Messenger) classify(info MessageInfo, e Entry) Action {
 	return UnknownAction
 }
 
-// newVerifyHandler returns a function which can be used to handle webhook verification
-func newVerifyHandler(token string) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.FormValue("hub.verify_token") == token {
+// verifyHandler returns a function which can be used to handle webhook verification
+func (m *Messenger) verifyHandler(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	token := r.FormValue("hub.verify_token")
+	for _, f := range m.verifyHandlers {
+		if f(token, ps) {
 			fmt.Fprintln(w, r.FormValue("hub.challenge"))
 			return
 		}
-		fmt.Fprintln(w, "Incorrect verify token.")
 	}
+	fmt.Fprintln(w, "Incorrect verify token.")
 }

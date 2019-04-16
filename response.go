@@ -237,44 +237,6 @@ func (r *Response) AttachmentData(dataType AttachmentType, filename string, file
 	return checkFacebookError(resp.Body)
 }
 
-// AttachmentData sends an image, sound, video or a regular file to a chat via an io.Reader.
-func (r *Response) AttachmentData(dataType AttachmentType, filename string, filedata io.Reader) error {
-	var b bytes.Buffer
-	w := multipart.NewWriter(&b)
-
-	data, err := w.CreateFormFile("filedata", filename)
-	if err != nil {
-		return err
-	}
-
-	_, err = io.Copy(data, filedata)
-	if err != nil {
-		return err
-	}
-
-	w.WriteField("recipient", fmt.Sprintf(`{"id":"%v"}`, r.to.ID))
-	w.WriteField("message", fmt.Sprintf(`{"attachment":{"type":"%v", "payload":{}}}`, dataType))
-
-	req, err := http.NewRequest("POST", SendMessageURL, &b)
-	if err != nil {
-		return err
-	}
-
-	req.URL.RawQuery = "access_token=" + r.token
-
-	req.Header.Set("Content-Type", w.FormDataContentType())
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	var res bytes.Buffer
-	res.ReadFrom(resp.Body)
-	return nil
-}
-
 // ButtonTemplate sends a message with the main contents being button elements
 func (r *Response) ButtonTemplate(text string, buttons *[]StructuredMessageButton, messagingType MessagingType, tags ...string) error {
 	var tag string
