@@ -1,4 +1,4 @@
-module github.com/dfischer/messenger
+module github.com/tractus/messenger
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
